@@ -1,5 +1,4 @@
 rm(list = ls())
-#setwd("C:/Users/17203/OneDrive - Montana State University/Documents/403/research project")
 library(tidyverse)
 library(stringr)
 library(fastDummies)

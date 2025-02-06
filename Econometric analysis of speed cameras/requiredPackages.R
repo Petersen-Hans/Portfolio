@@ -1,0 +1,6 @@
+install.packages("tidyverse")
+install.packages("stringr")
+install.packages("fastDummies")
+install.packages("rvest")
+install.packages("fixest")
+install.packages("modelsummary")
