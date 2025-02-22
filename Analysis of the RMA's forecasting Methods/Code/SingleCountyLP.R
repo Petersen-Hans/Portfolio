@@ -1,0 +1,107 @@
+library(nloptr)
+library(readxl)
+library(parallel)
+rm(list=ls())
+
+df504 <- read_excel("countyData_CornSoy.xlsx", sheet = "ctyData corn rr504")
+df508 <- read_excel("countyData_CornSoy.xlsx", sheet = "ctyData corn rr508")
+df766 <- read_excel("countyData_CornSoy.xlsx", sheet = "ctyData soy rr766")
+df660 <- read_excel("countyData_CornSoy.xlsx", sheet = "ctyData soy rr660")
+df660<-subset(df660,df660$CommodityYear>1983)
+
+dfbig<-rbind(df504,df508,df766,df660)
+
+counties<-unique(dfbig$fullfips)
+
+LPmodels<-list()
+
+cl<-makeCluster(detectCores()-1)
+#on.exit(stopCluster(cl))
+
+clusterExport(cl, varlist = c("dfbig", "counties"), envir = .GlobalEnv)
+clusterEvalQ(cl, library(nloptr))
+LPmodels<-parLapply(cl, 1:length(counties), function(z){
+  dfcounty<-subset(dfbig, dfbig$fullfips==counties[z])
+  dfcounty <- dfcounty[order(dfcounty$CommodityYear), ]
+  firstStart<-min(dfcounty$CommodityYear)
+  lastStart<-max(dfcounty$CommodityYear)-31
+  modelSize<-lastStart - firstStart
+  countyModels<-list()
+  
+  
+  for (j in firstStart:lastStart) {
+    bestModel<-NULL
+    models<-list()
+    windowEnd<-j+29
+    dfWindow <- dfcounty[dfcounty$CommodityYear >= j & dfcounty$CommodityYear <= windowEnd, ]
+    
+    for (i in 6:(nrow(dfWindow)-6)) {
+      breakpointYear <- dfWindow$CommodityYear[i]
+      dfWindow$spline1 <- ifelse(dfWindow$CommodityYear > breakpointYear, dfWindow$CommodityYear - breakpointYear, 0)
+      
+        objective_function <- function(params, data) {
+          # Extract parameters
+          beta0 <- params[1]  # Intercept
+          beta1 <- params[2]  # Slope before change
+          beta2 <- params[3]  # Additional slope after change
+
+          # Calculate the predicted yield
+          predicted_yield <- beta0 + beta1 * data$CommodityYear + beta2 * data$spline1
+
+          # Calculate residuals (difference between observed and predicted yields)
+          residuals <- data$dryPlYldFinal - predicted_yield
+
+          # Sum of squared errors
+          SSE <- sum(residuals^2)
+
+          return(SSE)
+        }
+
+
+        # Initial guesses for parameters
+        initial_params <- c(intercept = 0, slope1 = 1, slope2 = 1)  # Adjust based on your context
+
+        # Define the constraints (slopes >= 0)
+        constraints <- function(params) {
+          -sum(params['slope1'], params['slope2'])
+        }
+
+        # Optimization settings, including the constraint that slopes >= 0
+        opts <- list("algorithm"="NLOPT_LN_COBYLA", "xtol_rel"=1.0e-7, "minf_max"=1.0e-8, "maxeval"=250)
+
+        result <- nloptr(x0 = initial_params,
+                         eval_f = function(params) objective_function(params, dfWindow),
+                         lb = c(-Inf, -10, -10),
+                         opts = opts,
+                         eval_g_ineq = constraints)
+
+        foreYear<-subset(dfcounty, dfcounty$CommodityYear == windowEnd+2)
+        result$forecastYear<-foreYear$CommodityYear
+        result$actualForecastYield<-foreYear$dryPlYldFinal
+        
+        if(is.null(bestModel)){
+          bestModel<-result
+          bestModel$breakpoint1<-breakpointYear
+          bestModel$startYear <- j
+          bestModel$forecastVal<-bestModel$solution[1] + bestModel$solution[2] * (bestModel$startYear+31) + bestModel$solution[3] * (bestModel$startYear+31 - bestModel$breakpoint1)
+           bestModel$forecastError<- bestModel$forecastError - bestModel$actualForecastYield
+          
+        } else if(bestModel$objective > result$objective){
+          bestModel<-result
+          bestModel$breakpoint1<-breakpointYear
+          bestModel$startYear <- j
+          bestModel$forecastVal<-bestModel$solution[1] + bestModel$solution[2] * (bestModel$startYear+31) + bestModel$solution[3] * (bestModel$startYear+31 - bestModel$breakpoint1)
+          bestModel$forecastError<- bestModel$forecastVal - bestModel$actualForecastYield
+          }
+        
+
+    }
+    countyModels[[paste0("Best model for ", j)]] <- bestModel
+  }
+  countyModels
+})
+
+names(LPmodels)<-counties
+singleSplineRRLP<-LPmodels
+save(singleSplineRRLP, file = "LPSingleSplineModels.Rdata")
+stopCluster(cl)
